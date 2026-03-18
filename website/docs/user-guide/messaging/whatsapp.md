@@ -95,6 +95,10 @@ Add the following to your `~/.hermes/.env` file:
 WHATSAPP_ENABLED=true
 WHATSAPP_MODE=bot                          # "bot" or "self-chat"
 WHATSAPP_ALLOWED_USERS=15551234567         # Comma-separated phone numbers (with country code, no +)
+
+# Optional
+WHATSAPP_REPLY_PREFIX=                     # Empty disables the default "Hermes Agent" header
+# WHATSAPP_REPLY_PREFIX=Susie\\n\\n        # Example custom prefix with newlines
 ```
 
 Then start the gateway:
@@ -140,7 +144,7 @@ Hermes supports voice on WhatsApp:
 
 - **Incoming:** Voice messages (`.ogg` opus) are automatically transcribed using the configured STT provider: local `faster-whisper`, Groq Whisper (`GROQ_API_KEY`), or OpenAI Whisper (`VOICE_TOOLS_OPENAI_KEY`)
 - **Outgoing:** TTS responses are sent as MP3 audio file attachments
-- Agent responses are prefixed with "⚕ **Hermes Agent**" by default. You can customize or disable this in `config.yaml`:
+- Agent responses are prefixed with "⚕ **Hermes Agent**" by default. You can customize or disable this in `config.yaml` or via the `WHATSAPP_REPLY_PREFIX` environment variable:
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -148,6 +152,8 @@ whatsapp:
   reply_prefix: ""                          # Empty string disables the header
   # reply_prefix: "🤖 *My Bot*\n──────\n"  # Custom prefix (supports \n for newlines)
 ```
+
+`WHATSAPP_REPLY_PREFIX` works as an environment-variable override for backward compatibility, but `config.yaml` is the preferred path.
 
 ---
 
