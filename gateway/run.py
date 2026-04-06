@@ -1275,18 +1275,34 @@ class GatewayRunner:
         while self._running:
             try:
                 self.session_store._ensure_loaded()
+                # Collect expired sessions first, then log a single summary.
+                _expired_entries = []
                 for key, entry in list(self.session_store._entries.items()):
                     if entry.memory_flushed:
-                        continue  # already flushed this session (persisted to disk)
+                        continue
                     if not self.session_store._is_session_expired(entry):
-                        continue  # session still active
-                    # Session has expired — flush memories in the background
-                    logger.info(
-                        "Session %s expired (key=%s), flushing memories proactively",
-                        entry.session_id, key,
+                        continue
+                    _expired_entries.append((key, entry))
+
+                if _expired_entries:
+                    # Extract platform names from session keys for a compact summary.
+                    # Keys look like "agent:main:telegram:dm:12345" — platform is field [2].
+                    _platforms: dict[str, int] = {}
+                    for _k, _e in _expired_entries:
+                        _parts = _k.split(":")
+                        _plat = _parts[2] if len(_parts) > 2 else "unknown"
+                        _platforms[_plat] = _platforms.get(_plat, 0) + 1
+                    _plat_summary = ", ".join(
+                        f"{p}:{c}" for p, c in sorted(_platforms.items())
                     )
+                    logger.info(
+                        "Session expiry: %d sessions to flush (%s)",
+                        len(_expired_entries), _plat_summary,
+                    )
+
+                for key, entry in _expired_entries:
                     try:
-                        await self._async_flush_memories(entry.session_id, key)
+                        await self._async_flush_memories(entry.session_id)
                         # Shut down memory provider on the cached agent
                         cached_agent = self._running_agents.get(key)
                         if cached_agent and cached_agent is not _AGENT_PENDING_SENTINEL:
@@ -1300,8 +1316,8 @@ class GatewayRunner:
                         with self.session_store._lock:
                             entry.memory_flushed = True
                             self.session_store._save()
-                        logger.info(
-                            "Pre-reset memory flush completed for session %s",
+                        logger.debug(
+                            "Memory flush completed for session %s",
                             entry.session_id,
                         )
                         _flush_failures.pop(entry.session_id, None)
@@ -1310,7 +1326,7 @@ class GatewayRunner:
                         _flush_failures[entry.session_id] = failures
                         if failures >= _MAX_FLUSH_RETRIES:
                             logger.warning(
-                                "Proactive memory flush gave up after %d attempts for %s: %s. "
+                                "Memory flush gave up after %d attempts for %s: %s. "
                                 "Marking as flushed to prevent infinite retry loop.",
                                 failures, entry.session_id, e,
                             )
@@ -1320,9 +1336,24 @@ class GatewayRunner:
                             _flush_failures.pop(entry.session_id, None)
                         else:
                             logger.debug(
-                                "Proactive memory flush failed (%d/%d) for %s: %s",
+                                "Memory flush failed (%d/%d) for %s: %s",
                                 failures, _MAX_FLUSH_RETRIES, entry.session_id, e,
                             )
+
+                if _expired_entries:
+                    _flushed = sum(
+                        1 for _, e in _expired_entries if e.memory_flushed
+                    )
+                    _failed = len(_expired_entries) - _flushed
+                    if _failed:
+                        logger.info(
+                            "Session expiry done: %d flushed, %d pending retry",
+                            _flushed, _failed,
+                        )
+                    else:
+                        logger.info(
+                            "Session expiry done: %d flushed", _flushed,
+                        )
             except Exception as e:
                 logger.debug("Session expiry watcher error: %s", e)
             # Sleep in small increments so we can stop quickly
@@ -2252,6 +2283,14 @@ class GatewayRunner:
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        _msg_start_time = time.time()
+        _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
+        _msg_preview = (event.text or "")[:80].replace("\n", " ")
+        logger.info(
+            "inbound message: platform=%s user=%s chat=%s msg=%r",
+            _platform_name, source.user_name or source.user_id or "unknown",
+            source.chat_id or "unknown", _msg_preview,
+        )
 
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
@@ -2864,6 +2903,14 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
             agent_messages = agent_result.get("messages", [])
+            _response_time = time.time() - _msg_start_time
+            _api_calls = agent_result.get("api_calls", 0)
+            _resp_len = len(response)
+            logger.info(
+                "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
+                _platform_name, source.chat_id or "unknown",
+                _response_time, _api_calls, _resp_len,
+            )
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
