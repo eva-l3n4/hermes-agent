@@ -266,6 +266,9 @@ class SessionManager:
                         "updated_at": _format_updated_at(
                             persisted.get("last_active") or persisted.get("started_at") or time.time()
                         ),
+                        "started_at": persisted.get("started_at"),
+                        "last_active": persisted.get("last_active"),
+                        "source": persisted.get("source"),
                     }
                 )
 
@@ -293,6 +296,9 @@ class SessionManager:
                 "history_len": message_count,
                 "title": _build_session_title(row.get("title"), row.get("preview"), session_cwd),
                 "updated_at": _format_updated_at(row.get("last_active") or row.get("started_at")),
+                "started_at": row.get("started_at"),
+                "last_active": row.get("last_active"),
+                "source": row.get("source"),
             })
 
         results.sort(key=lambda item: _updated_at_sort_key(item.get("updated_at")), reverse=True)
@@ -327,6 +333,23 @@ class SessionManager:
                     db.delete_session(sid)
             except Exception:
                 logger.debug("Failed to cleanup ACP sessions from DB", exc_info=True)
+
+    def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the last *limit* messages from a session's history.
+
+        Returns simplified dicts with ``role`` and ``content`` keys.
+        """
+        state = self.get_session(session_id)
+        if state is None:
+            return []
+        messages = state.history[-limit:]
+        return [
+            {
+                "role": msg.get("role", ""),
+                "content": str(msg.get("content", "")),
+            }
+            for msg in messages
+        ]
 
     def save_session(self, session_id: str) -> None:
         """Persist the current state of a session to the database.
