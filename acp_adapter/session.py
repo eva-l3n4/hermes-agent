@@ -162,46 +162,65 @@ class SessionManager:
         logger.info("Forked ACP session %s -> %s", session_id, new_id)
         return state
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        """Return lightweight info dicts for all sessions (memory + database)."""
-        # Collect in-memory sessions first.
+    def list_sessions(self, source: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return lightweight info dicts for all sessions (memory + database).
+
+        Args:
+            source: Filter by session source (e.g. ``"acp"``). Pass ``None`` to
+                    include sessions from all sources (CLI, Discord, etc.).
+        """
+        db = self._get_db()
+
+        # Build a lookup of DB metadata for in-memory sessions.
+        db_rows: Dict[str, Any] = {}
+        if db is not None:
+            try:
+                rows = db.search_sessions(source=source, limit=1000)
+                for row in rows:
+                    db_rows[row["id"]] = row
+            except Exception:
+                logger.debug("Failed to list sessions from DB", exc_info=True)
+
+        # Collect in-memory sessions, enriched with DB metadata.
         with self._lock:
             seen_ids = set(self._sessions.keys())
-            results = [
-                {
+            results = []
+            for s in self._sessions.values():
+                info: Dict[str, Any] = {
                     "session_id": s.session_id,
                     "cwd": s.cwd,
                     "model": s.model,
                     "history_len": len(s.history),
                 }
-                for s in self._sessions.values()
-            ]
+                row = db_rows.get(s.session_id)
+                if row:
+                    info["title"] = row.get("title")
+                    info["started_at"] = row.get("started_at")
+                    info["last_active"] = row.get("last_active")
+                    info["source"] = row.get("source")
+                results.append(info)
 
-        # Merge any persisted sessions not currently in memory.
-        db = self._get_db()
-        if db is not None:
-            try:
-                rows = db.search_sessions(source="acp", limit=1000)
-                for row in rows:
-                    sid = row["id"]
-                    if sid in seen_ids:
-                        continue
-                    # Extract cwd from model_config JSON.
-                    cwd = "."
-                    mc = row.get("model_config")
-                    if mc:
-                        try:
-                            cwd = json.loads(mc).get("cwd", ".")
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    results.append({
-                        "session_id": sid,
-                        "cwd": cwd,
-                        "model": row.get("model") or "",
-                        "history_len": row.get("message_count") or 0,
-                    })
-            except Exception:
-                logger.debug("Failed to list ACP sessions from DB", exc_info=True)
+        # Merge persisted sessions not currently in memory.
+        for sid, row in db_rows.items():
+            if sid in seen_ids:
+                continue
+            cwd = "."
+            mc = row.get("model_config")
+            if mc:
+                try:
+                    cwd = json.loads(mc).get("cwd", ".")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append({
+                "session_id": sid,
+                "cwd": cwd,
+                "model": row.get("model") or "",
+                "history_len": row.get("message_count") or 0,
+                "title": row.get("title"),
+                "started_at": row.get("started_at"),
+                "last_active": row.get("last_active"),
+                "source": row.get("source"),
+            })
 
         return results
 
@@ -234,6 +253,23 @@ class SessionManager:
                     db.delete_session(sid)
             except Exception:
                 logger.debug("Failed to cleanup ACP sessions from DB", exc_info=True)
+
+    def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the last *limit* messages from a session's history.
+
+        Returns simplified dicts with ``role`` and ``content`` keys.
+        """
+        state = self.get_session(session_id)
+        if state is None:
+            return []
+        messages = state.history[-limit:]
+        return [
+            {
+                "role": msg.get("role", ""),
+                "content": str(msg.get("content", "")),
+            }
+            for msg in messages
+        ]
 
     def save_session(self, session_id: str) -> None:
         """Persist the current state of a session to the database.
