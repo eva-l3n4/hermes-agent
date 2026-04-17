@@ -334,22 +334,52 @@ class SessionManager:
             except Exception:
                 logger.debug("Failed to cleanup ACP sessions from DB", exc_info=True)
 
-    def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Return the last *limit* messages from a session's history.
+    def get_session_history(self, session_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Return paginated user+assistant messages from a session's history.
 
-        Returns simplified dicts with ``role`` and ``content`` keys.
+        Args:
+            limit: Max number of visible (user/assistant) messages to return.
+            offset: Skip this many visible messages from the end (0 = most recent).
+
+        Returns dict with ``messages`` (list of {role, content}) and ``total``
+        (total visible message count for pagination).
         """
         state = self.get_session(session_id)
         if state is None:
-            return []
-        messages = state.history[-limit:]
-        return [
-            {
-                "role": msg.get("role", ""),
-                "content": str(msg.get("content", "")),
-            }
-            for msg in messages
-        ]
+            return {"messages": [], "total": 0}
+
+        # Filter to user+assistant with non-empty text content
+        visible = []
+        for msg in state.history:
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content")
+            if content is None:
+                continue
+            if isinstance(content, list):
+                # Content blocks — extract text parts
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                content = "\n".join(text_parts)
+            else:
+                content = str(content)
+            if not content.strip():
+                continue
+            visible.append({"role": role, "content": content})
+
+        total = len(visible)
+        # Paginate from the end: offset=0 returns the last `limit` messages
+        end = total - offset
+        start = max(0, end - limit)
+        page = visible[max(0, start):max(0, end)]
+
+        return {"messages": page, "total": total}
 
     def save_session(self, session_id: str) -> None:
         """Persist the current state of a session to the database.
