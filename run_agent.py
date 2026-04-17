@@ -6763,14 +6763,14 @@ class AIAgent:
             # (the documented max output for qwen3-coder models) so the
             # model has adequate output budget for tool calls.
             api_kwargs.update(self._max_tokens_param(65536))
-        elif (self._is_openrouter_url() or "nousresearch" in self._base_url_lower) and "claude" in (self.model or "").lower():
-            # OpenRouter and Nous Portal translate requests to Anthropic's
-            # Messages API, which requires max_tokens as a mandatory field.
-            # When we omit it, the proxy picks a default that can be too
-            # low — the model spends its output budget on thinking and has
-            # almost nothing left for the actual response (especially large
-            # tool calls like write_file).  Sending the model's real output
-            # limit ensures full capacity.
+        elif (self._is_openrouter_url() or "nousresearch" in self._base_url_lower or self._supports_claude_local_thinking()) and "claude" in (self.model or "").lower():
+            # OpenRouter, Nous Portal, and our local LiteLLM-backed Claude
+            # route all translate to Anthropic's Messages API, which requires
+            # max_tokens as a mandatory field. When we omit it, the proxy
+            # picks a default that can be too low — the model spends its
+            # output budget on thinking and has almost nothing left for the
+            # actual response (especially large tool calls like write_file).
+            # Sending the model's real output limit ensures full capacity.
             try:
                 from agent.anthropic_adapter import _get_anthropic_max_output
                 _model_output_limit = _get_anthropic_max_output(self.model)
@@ -6814,6 +6814,35 @@ class AIAgent:
                         "effort": "medium"
                     }
 
+        # Claude via LiteLLM-backed local proxy (custom provider):
+        # send top-level `reasoning_effort` so LiteLLM's azure_ai/ provider
+        # translates it to Anthropic's extended thinking (enabled + budget).
+        # Uses the already-resolved reasoning_config.effort (default "medium").
+        #
+        # NB: sending `thinking:{type:"adaptive"}` in extra_body looks
+        # appealing for Claude 4.6/4.7/Mythos, but today Azure APIM's
+        # Anthropic route SILENTLY DISABLES thinking when it sees that
+        # field (no 400 — just zero reasoning tokens back). Until Azure
+        # catches up to Anthropic-direct adaptive support, we stick with
+        # plain reasoning_effort. Re-enable forward-compat once verified.
+        if self._supports_claude_local_thinking():
+            _rc = self.reasoning_config or {}
+            _enabled = _rc.get("enabled", True) if isinstance(_rc, dict) else True
+            _effort = (
+                _rc.get("effort") if isinstance(_rc, dict) and _rc.get("effort")
+                else "medium"
+            )
+            if _enabled and _effort and str(_effort).lower() not in ("none",):
+                # Clamp xhigh -> high for non-4.7 models (only 4.7 supports xhigh)
+                _model_lower = (self.model or "").lower()
+                _is_opus_47 = "claude-opus-4-7" in _model_lower or "mythos" in _model_lower
+                _effort_out = str(_effort).lower()
+                if _effort_out == "xhigh" and not _is_opus_47:
+                    _effort_out = "high"
+                if _effort_out == "minimal":
+                    _effort_out = "low"
+                api_kwargs["reasoning_effort"] = _effort_out
+
         # Nous Portal product attribution
         if _is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
@@ -6851,6 +6880,32 @@ class AIAgent:
             api_kwargs.update(self.request_overrides)
 
         return api_kwargs
+
+    def _supports_claude_local_thinking(self) -> bool:
+        """Return True when the model is a Claude family model being served
+        via a LiteLLM-backed local proxy (e.g. model-router → LiteLLM's
+        azure_ai/ provider → Azure APIM → Anthropic Messages).
+
+        Gated to localhost/127.0.0.1 base URLs so we don't accidentally send
+        `reasoning_effort` to a provider that rejects unknown fields.
+        """
+        base = self._base_url_lower or ""
+        is_local = (
+            "localhost" in base
+            or "127.0.0.1" in base
+            or "0.0.0.0" in base
+        )
+        if not is_local:
+            return False
+        model = (self.model or "").lower()
+        # Match claude-opus-*, claude-sonnet-*, claude-haiku-*, claude-mythos-*,
+        # with or without azure/ or anthropic/ prefix.
+        return (
+            "claude-opus-" in model
+            or "claude-sonnet-" in model
+            or "claude-haiku-" in model
+            or "claude-mythos" in model
+        )
 
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
