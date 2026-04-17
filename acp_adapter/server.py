@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Deque, Optional
@@ -150,6 +151,9 @@ class HermesACPAgent(acp.Agent):
         super().__init__()
         self.session_manager = session_manager or SessionManager()
         self._conn: Optional[acp.Client] = None
+        # Mark as interactive so the approval system prompts via
+        # request_permission instead of auto-approving.
+        os.environ["HERMES_INTERACTIVE"] = "1"
 
     # ---- Connection lifecycle -----------------------------------------------
 
@@ -164,8 +168,8 @@ class HermesACPAgent(acp.Agent):
         if name == "hermes/get_session_history":
             session_id = params.get("session_id") or params.get("sessionId") or ""
             limit = int(params.get("limit", 50))
-            messages = self.session_manager.get_session_history(session_id, limit)
-            return {"messages": messages}
+            offset = int(params.get("offset", 0))
+            return self.session_manager.get_session_history(session_id, limit, offset)
         return None
 
     async def _register_session_mcp_servers(
@@ -436,7 +440,8 @@ class HermesACPAgent(acp.Agent):
 
         agent = state.agent
         agent.tool_progress_callback = tool_progress_cb
-        agent.thinking_callback = thinking_cb
+        agent.thinking_callback = None  # Don't send kawaii spinner text — TUI has its own indicators
+        agent.reasoning_callback = thinking_cb  # Actual model reasoning → agent_thought_chunk
         agent.step_callback = step_cb
         agent.message_callback = message_cb
 
@@ -482,6 +487,20 @@ class HermesACPAgent(acp.Agent):
         if final_response and conn:
             update = acp.update_agent_message_text(final_response)
             await conn.session_update(session_id, update)
+
+        # Auto-generate session title after first exchange (non-blocking)
+        if final_response and not result.get("failed") and not result.get("partial"):
+            try:
+                from agent.title_generator import maybe_auto_title
+                maybe_auto_title(
+                    getattr(state.agent, "_session_db", None),
+                    session_id,
+                    user_text,
+                    final_response,
+                    state.history,
+                )
+            except Exception:
+                pass
 
         usage = None
         if any(result.get(key) is not None for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
@@ -713,9 +732,10 @@ class HermesACPAgent(acp.Agent):
         title = args.strip()
         if db:
             try:
-                db.rename_session(state.session_id, title)
+                db.set_session_title(state.session_id, title)
             except Exception:
-                logger.debug("Failed to set session title", exc_info=True)
+                logger.warning("Failed to set session title", exc_info=True)
+                return f"Failed to set title: see logs"
         return f"Session title set: {title}"
 
     def _cmd_yolo(self, args: str, state: SessionState) -> str:
