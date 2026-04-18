@@ -498,11 +498,15 @@ def _normalize_approval_mode(mode) -> str:
     YAML 1.1 treats bare words like `off` as booleans, so a config entry like
     `approvals:\n  mode: off` is parsed as False unless quoted. Treat that as the
     intended string mode instead of falling back to manual approvals.
+
+    "yolo" is treated as "off" (bypass all approvals).
     """
     if isinstance(mode, bool):
         return "off" if mode is False else "manual"
     if isinstance(mode, str):
         normalized = mode.strip().lower()
+        if normalized == "yolo":
+            return "off"
         return normalized or "manual"
     return "manual"
 

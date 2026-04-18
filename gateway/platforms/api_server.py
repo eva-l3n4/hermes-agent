@@ -2032,6 +2032,114 @@ class APIServerAdapter(BasePlatformAdapter):
         return await loop.run_in_executor(None, _run)
 
     # ------------------------------------------------------------------
+    # /v1/sessions — session listing and resumption
+    # ------------------------------------------------------------------
+
+    async def _handle_list_sessions(self, request: "web.Request") -> "web.Response":
+        """GET /v1/sessions — list recent sessions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response(
+                _openai_error("Session database unavailable", err_type="server_error"),
+                status=500,
+            )
+
+        limit = min(int(request.query.get("limit", "20")), 100)
+        offset = int(request.query.get("offset", "0"))
+        source = request.query.get("source")
+
+        try:
+            sessions = db.list_sessions_rich(
+                source=source, limit=limit, offset=offset,
+            )
+        except Exception as e:
+            logger.error("Failed to list sessions: %s", e)
+            return web.json_response(
+                _openai_error(f"Failed to list sessions: {e}", err_type="server_error"),
+                status=500,
+            )
+
+        return web.json_response({
+            "object": "list",
+            "data": sessions,
+        })
+
+    async def _handle_get_session_messages(self, request: "web.Request") -> "web.Response":
+        """GET /v1/sessions/{session_id}/messages — get messages for a session."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response(
+                _openai_error("Session database unavailable", err_type="server_error"),
+                status=500,
+            )
+
+        session_id = request.match_info["session_id"]
+
+        # Support prefix matching
+        resolved_id = db.resolve_session_id(session_id)
+        if resolved_id is None:
+            return web.json_response(
+                _openai_error(f"Session not found: {session_id}"),
+                status=404,
+            )
+
+        try:
+            messages = db.get_messages(resolved_id)
+        except Exception as e:
+            logger.error("Failed to get messages for session %s: %s", resolved_id, e)
+            return web.json_response(
+                _openai_error(f"Failed to get messages: {e}", err_type="server_error"),
+                status=500,
+            )
+
+        # Simplify: return only role + content for the TUI
+        simplified = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content") or ""
+            if role in ("user", "assistant", "system") and content:
+                simplified.append({"role": role, "content": content})
+
+        return web.json_response({
+            "object": "list",
+            "session_id": resolved_id,
+            "data": simplified,
+        })
+
+    # ------------------------------------------------------------------
+    # /v1/status — server status for TUI clients
+    # ------------------------------------------------------------------
+
+    async def _handle_status(self, request: "web.Request") -> "web.Response":
+        """GET /v1/status — return current server config for TUI clients."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        # Resolve the actual model being used
+        actual_model = self._model_name
+        try:
+            from gateway.run import _resolve_gateway_model
+            actual_model = _resolve_gateway_model() or self._model_name
+        except Exception:
+            pass
+
+        return web.json_response({
+            "model": actual_model,
+            "model_display": self._model_name,
+            "host": self._host,
+            "port": self._port,
+        })
+
+    # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
     # ------------------------------------------------------------------
 
@@ -2321,6 +2429,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+            # Session and status endpoints (for TUI clients)
+            self._app.router.add_get("/v1/sessions", self._handle_list_sessions)
+            self._app.router.add_get("/v1/sessions/{session_id}/messages", self._handle_get_session_messages)
+            self._app.router.add_get("/v1/status", self._handle_status)
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)
