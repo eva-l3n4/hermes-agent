@@ -267,9 +267,26 @@ def _build_child_agent(
     # so disabled tools (e.g. web) don't leak to subagents.
     # Note: enabled_toolsets=None means "all tools enabled" (the default),
     # so we must derive effective toolsets from the parent's loaded tools.
+    #
+    # Composite toolsets (e.g. "hermes-cli") must be resolved into their
+    # constituent tool names so the intersection with child-requested toolsets
+    # (e.g. ["terminal", "file"]) works correctly.  Without this, the literal
+    # name comparison fails and children get zero tools.
+    from toolsets import resolve_toolset
     parent_enabled = getattr(parent_agent, "enabled_toolsets", None)
     if parent_enabled is not None:
+        # Resolve composite toolsets → individual tool names
+        parent_tool_names: set[str] = set()
+        for ts in parent_enabled:
+            parent_tool_names.update(resolve_toolset(ts))
+        # Build parent_toolsets containing both original names AND the individual
+        # toolset names that each tool belongs to (via reverse lookup)
         parent_toolsets = set(parent_enabled)
+        import model_tools as _mt
+        for tool_name in parent_tool_names:
+            ts_name = _mt.get_toolset_for_tool(tool_name)
+            if ts_name:
+                parent_toolsets.add(ts_name)
     elif parent_agent and hasattr(parent_agent, "valid_tool_names"):
         # enabled_toolsets is None (all tools) — derive from loaded tool names
         import model_tools
