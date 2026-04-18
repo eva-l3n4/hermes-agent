@@ -7469,7 +7469,27 @@ class AIAgent:
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
-            compressed.append({"role": "user", "content": todo_snapshot})
+            # The next call to run_conversation will append a user message, so
+            # we must NOT end the compressed history with a user message here.
+            # Merge the todo into the last assistant message instead.
+            merged = False
+            if compressed:
+                last_role = compressed[-1].get("role")
+                if last_role == "assistant":
+                    existing = compressed[-1].get("content") or ""
+                    compressed[-1]["content"] = (
+                        existing + "\n\n[Task list preserved across compression]\n" + todo_snapshot
+                        if existing else todo_snapshot
+                    )
+                    merged = True
+                elif last_role == "user":
+                    # Last message is already user — merge there (will be followed
+                    # by the new user message, but run_conversation handles this)
+                    existing = compressed[-1].get("content") or ""
+                    compressed[-1]["content"] = existing + "\n\n" + todo_snapshot
+                    merged = True
+            if not merged:
+                compressed.append({"role": "assistant", "content": todo_snapshot})
 
         self._invalidate_system_prompt()
         new_system_prompt = self._build_system_prompt(system_message)
