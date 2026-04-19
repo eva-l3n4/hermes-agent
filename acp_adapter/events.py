@@ -46,10 +46,16 @@ def _send_notification(
     method: str,
     params: dict,
 ) -> None:
-    """Fire-and-forget a JSON-RPC notification from a worker thread."""
+    """Fire-and-forget a JSON-RPC notification from a worker thread.
+
+    ``method`` should be given without the leading underscore; the ACP
+    ``AgentSideConnection.ext_notification`` helper prepends it automatically
+    (so ``"hermes/subagent_update"`` goes on the wire as
+    ``"_hermes/subagent_update"``, matching the extension namespace convention).
+    """
     try:
         future = asyncio.run_coroutine_threadsafe(
-            conn.send_notification(method, params), loop
+            conn.ext_notification(method, params), loop
         )
         future.result(timeout=5)
     except Exception:
@@ -104,7 +110,7 @@ def _emit_subagent_update(
         if "duration_seconds" in kwargs:
             params["duration_seconds"] = kwargs["duration_seconds"]
 
-    _send_notification(conn, loop, "_hermes/subagent_update", params)
+    _send_notification(conn, loop, "hermes/subagent_update", params)
 
 
 # ------------------------------------------------------------------

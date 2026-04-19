@@ -370,7 +370,7 @@ class TestSubagentBridge:
         )
         assert len(calls) == 1
         method, params = calls[0]
-        assert method == "_hermes/subagent_update"
+        assert method == "hermes/subagent_update"
         assert params["session_id"] == "parent-sid"
         assert params["child_session_id"] == "child-sid"
         assert params["event_type"] == "start"
@@ -391,7 +391,7 @@ class TestSubagentBridge:
         )
         assert len(calls) == 1
         method, params = calls[0]
-        assert method == "_hermes/subagent_update"
+        assert method == "hermes/subagent_update"
         assert params["event_type"] == "thinking"
         assert params["preview"] == "reasoning about the problem"
         assert params["child_session_id"] == "child-sid"
@@ -409,7 +409,7 @@ class TestSubagentBridge:
         )
         assert len(calls) == 1
         method, params = calls[0]
-        assert method == "_hermes/subagent_update"
+        assert method == "hermes/subagent_update"
         assert params["event_type"] == "tool"
         assert params["tool_name"] == "terminal"
         assert params["preview"] == "$ ls -la"
@@ -430,7 +430,7 @@ class TestSubagentBridge:
         )
         assert len(calls) == 1
         method, params = calls[0]
-        assert method == "_hermes/subagent_update"
+        assert method == "hermes/subagent_update"
         assert params["event_type"] == "complete"
         assert params["status"] == "success"
         assert params["summary"] == "all done"
