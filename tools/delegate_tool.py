@@ -178,6 +178,7 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
     # Gateway: batch tool names, flush periodically
     _BATCH_SIZE = 5
     _batch: List[str] = []
+    _state: Dict[str, Any] = {"child_session_id": None}
 
     def _relay(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
         if not parent_cb:
@@ -191,6 +192,7 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
                 task_index=task_index,
                 task_count=task_count,
                 goal=goal_label,
+                child_session_id=_state.get("child_session_id"),
                 **kwargs,
             )
         except Exception as e:
@@ -259,6 +261,7 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
             _batch.clear()
 
     _callback._flush = _flush
+    _callback._relay_state = _state
     return _callback
 
 
@@ -423,6 +426,13 @@ def _build_child_agent(
     child._print_fn = getattr(parent_agent, '_print_fn', None)
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
+
+    # Plumb child_session_id into the progress callback's relay state so the
+    # parent's gateway can correlate child events with the child's session.
+    if child_progress_cb is not None:
+        _relay_state = getattr(child_progress_cb, '_relay_state', None)
+        if _relay_state is not None:
+            _relay_state["child_session_id"] = getattr(child, "session_id", None)
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
