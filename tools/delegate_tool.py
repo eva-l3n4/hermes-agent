@@ -217,7 +217,20 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
             return
 
         # "_thinking" / reasoning events
-        if event_type in ("_thinking", "reasoning.available"):
+        # "_thinking" is the child's KawaiiSpinner face+verb text ("╰(°▽°)╯ pondering..."),
+        # not model reasoning — suppress from the relay so the zoom view only shows
+        # actual reasoning content. CLI spinner still gets them below.
+        if event_type == "_thinking":
+            text = preview or tool_name or ""
+            if spinner:
+                short = (text[:55] + "...") if len(text) > 55 else text
+                try:
+                    spinner.print_above(f" {prefix}├─ 💭 \"{short}\"")
+                except Exception as e:
+                    logger.debug("Spinner print_above failed: %s", e)
+            return
+
+        if event_type == "reasoning.available":
             text = preview or tool_name or ""
             if spinner:
                 short = (text[:55] + "...") if len(text) > 55 else text
