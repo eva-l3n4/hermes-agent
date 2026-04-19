@@ -26,6 +26,7 @@ from tools.delegate_tool import (
     delegate_task,
     _build_child_agent,
     _build_child_system_prompt,
+    _build_child_progress_callback,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -1284,6 +1285,70 @@ class TestDelegationReasoningEffort(unittest.TestCase):
         )
         call_kwargs = MockAgent.call_args[1]
         self.assertEqual(call_kwargs["reasoning_config"], {"enabled": True, "effort": "medium"})
+
+
+class TestChildProgressCallbackRelay(unittest.TestCase):
+    """Verify subagent.complete relay includes status and duration_seconds."""
+
+    def test_subagent_complete_relay_includes_status_and_duration(self):
+        """The _callback closure must forward status and duration_seconds
+        through _relay to the parent callback."""
+        parent_cb_calls = []
+
+        def stub_parent_cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
+            parent_cb_calls.append({
+                "event_type": event_type,
+                "tool_name": tool_name,
+                "preview": preview,
+                "args": args,
+                **kwargs,
+            })
+
+        mock_parent = MagicMock()
+        mock_parent._delegate_spinner = None
+        mock_parent.tool_progress_callback = stub_parent_cb
+
+        cb = _build_child_progress_callback(
+            task_index=0,
+            goal="test goal",
+            parent_agent=mock_parent,
+            task_count=1,
+        )
+        self.assertIsNotNone(cb)
+
+        # Simulate the child agent calling the callback with completion
+        cb("subagent.complete", preview="done", status="success", duration_seconds=3.14)
+
+        self.assertEqual(len(parent_cb_calls), 1)
+        call = parent_cb_calls[0]
+        self.assertEqual(call["event_type"], "subagent.complete")
+        self.assertEqual(call["status"], "success")
+        self.assertEqual(call["duration_seconds"], 3.14)
+
+    def test_subagent_complete_relay_failed_status(self):
+        """Failed completions must carry status='failed'."""
+        parent_cb_calls = []
+
+        def stub_parent_cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
+            parent_cb_calls.append({"event_type": event_type, **kwargs})
+
+        mock_parent = MagicMock()
+        mock_parent._delegate_spinner = None
+        mock_parent.tool_progress_callback = stub_parent_cb
+
+        cb = _build_child_progress_callback(
+            task_index=0,
+            goal="test goal",
+            parent_agent=mock_parent,
+            task_count=1,
+        )
+
+        cb("subagent.complete", preview="error occurred", status="failed", duration_seconds=1.5)
+
+        self.assertEqual(len(parent_cb_calls), 1)
+        call = parent_cb_calls[0]
+        self.assertEqual(call["status"], "failed")
+        self.assertEqual(call["duration_seconds"], 1.5)
 
 
 if __name__ == "__main__":
