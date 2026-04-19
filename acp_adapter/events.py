@@ -56,6 +56,11 @@ def _send_notification(
         logger.debug("Failed to send notification %s", method, exc_info=True)
 
 
+# NOTE: This bridge assumes at most ONE level of delegation
+# (parent -> child, no grandchildren), matching delegate_tool.MAX_DEPTH = 2.
+# If MAX_DEPTH is ever raised, the Kaishi-side zoom view needs updating to
+# handle nested children — today it degrades gracefully (unknown
+# child_session_id creates a new task line rather than being dropped).
 def _emit_subagent_update(
     conn: acp.Client,
     loop: asyncio.AbstractEventLoop,
