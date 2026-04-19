@@ -641,10 +641,15 @@ def _run_single_child(
             try:
                 child_progress_cb(
                     "subagent.complete",
+                    # `preview` is the single-line tail shown on the parent
+                    # transcript's task row — keep it short.
                     preview=summary[:160] if summary else entry.get("error", ""),
                     status=status,
                     duration_seconds=duration,
-                    summary=summary[:500] if summary else entry.get("error", ""),
+                    # `summary` is the full block shown in the zoom view.
+                    # Cap generously to guard against runaway output but
+                    # leave plenty of room for real multi-paragraph summaries.
+                    summary=summary[:8000] if summary else entry.get("error", ""),
                 )
             except Exception as e:
                 logger.debug("Progress callback completion failed: %s", e)
