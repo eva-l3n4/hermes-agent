@@ -569,6 +569,13 @@ def _run_single_child(
         else:
             status = "failed"
 
+        # Wire-protocol status for the ACP `subagent.complete` bridge.
+        # The Kaishi TUI expects exactly "success" | "failed" per the
+        # _hermes/subagent_update spec; map our richer internal status
+        # onto that binary at the wire boundary. "interrupted" reads as
+        # a failure from the UI's perspective (no usable output landed).
+        wire_status = "success" if status == "completed" else "failed"
+
         # Build tool trace from conversation messages (already in memory).
         # Uses tool_call_id to correctly pair parallel tool calls with results.
         tool_trace: list[Dict[str, Any]] = []
@@ -644,7 +651,7 @@ def _run_single_child(
                     # `preview` is the single-line tail shown on the parent
                     # transcript's task row — keep it short.
                     preview=summary[:160] if summary else entry.get("error", ""),
-                    status=status,
+                    status=wire_status,
                     duration_seconds=duration,
                     # `summary` is the full block shown in the zoom view.
                     # Cap generously to guard against runaway output but
