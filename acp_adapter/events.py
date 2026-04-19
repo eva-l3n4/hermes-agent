@@ -40,6 +40,68 @@ def _send_update(
         logger.debug("Failed to send ACP update", exc_info=True)
 
 
+def _send_notification(
+    conn: acp.Client,
+    loop: asyncio.AbstractEventLoop,
+    method: str,
+    params: dict,
+) -> None:
+    """Fire-and-forget a JSON-RPC notification from a worker thread."""
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            conn.send_notification(method, params), loop
+        )
+        future.result(timeout=5)
+    except Exception:
+        logger.debug("Failed to send notification %s", method, exc_info=True)
+
+
+def _emit_subagent_update(
+    conn: acp.Client,
+    loop: asyncio.AbstractEventLoop,
+    parent_session_id: str,
+    event_type: str,
+    tool_name,
+    preview,
+    args,
+    kwargs: dict,
+) -> None:
+    """Translate a subagent.* callback event into a _hermes/subagent_update notification."""
+    short_type = event_type.split(".", 1)[1]  # "subagent.start" -> "start"
+    params: dict = {
+        "session_id": parent_session_id,
+        "child_session_id": kwargs.get("child_session_id"),
+        "task_index": kwargs.get("task_index", 0),
+        "task_count": kwargs.get("task_count", 1),
+        "event_type": short_type,
+    }
+    if short_type == "start":
+        params["goal"] = kwargs.get("goal") or preview or ""
+    elif short_type == "thinking":
+        params["preview"] = preview or ""
+    elif short_type == "tool":
+        params["tool_name"] = tool_name or ""
+        if preview:
+            params["preview"] = preview
+        if isinstance(args, dict):
+            # Cap args serialization at ~2KB to avoid bloating notifications
+            import json as _json
+            try:
+                serialized = _json.dumps(args, ensure_ascii=False)
+                if len(serialized) <= 2048:
+                    params["args"] = args
+            except Exception:
+                pass
+    elif short_type == "complete":
+        params["status"] = kwargs.get("status", "success")
+        if preview:
+            params["summary"] = preview
+        if "duration_seconds" in kwargs:
+            params["duration_seconds"] = kwargs["duration_seconds"]
+
+    _send_notification(conn, loop, "_hermes/subagent_update", params)
+
+
 # ------------------------------------------------------------------
 # Tool progress callback
 # ------------------------------------------------------------------
@@ -64,6 +126,13 @@ def make_tool_progress_cb(
     """
 
     def _tool_progress(event_type: str, name: str = None, preview: str = None, args: Any = None, **kwargs) -> None:
+        # --- Subagent bridge ---
+        # Bridge subagent.* events (except subagent.progress which is CLI-only
+        # formatting) to the client as _hermes/subagent_update notifications.
+        if event_type.startswith("subagent.") and event_type != "subagent.progress":
+            _emit_subagent_update(conn, loop, session_id, event_type, name, preview, args, kwargs)
+            return
+
         # Only emit ACP ToolCallStart for tool.started; ignore other event types
         if event_type != "tool.started":
             return

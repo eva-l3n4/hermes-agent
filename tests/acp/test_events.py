@@ -325,3 +325,145 @@ class TestMessageCallback:
             cb("")
 
         mock_rcts.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Subagent bridge tests
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentBridge:
+    """Verify that subagent.* events are bridged to _hermes/subagent_update
+    notifications, and that subagent.progress / tool.started are not."""
+
+    def _make_cb(self, monkeypatch):
+        """Create a tool_progress_cb with _send_notification stubbed."""
+        calls = []
+
+        def fake_send_notification(conn, loop, method, params):
+            calls.append((method, params))
+
+        monkeypatch.setattr(
+            "acp_adapter.events._send_notification",
+            fake_send_notification,
+        )
+        cb = make_tool_progress_cb(
+            conn=MagicMock(spec=acp.Client),
+            session_id="parent-sid",
+            loop=None,
+            tool_call_ids={},
+            tool_call_meta={},
+        )
+        return cb, calls
+
+    def test_subagent_start_emits_update(self, monkeypatch):
+        cb, calls = self._make_cb(monkeypatch)
+        cb(
+            "subagent.start",
+            name="delegate_tool",
+            preview=None,
+            args={},
+            goal="do the thing",
+            child_session_id="child-sid",
+            task_index=0,
+            task_count=1,
+        )
+        assert len(calls) == 1
+        method, params = calls[0]
+        assert method == "_hermes/subagent_update"
+        assert params["session_id"] == "parent-sid"
+        assert params["child_session_id"] == "child-sid"
+        assert params["event_type"] == "start"
+        assert params["goal"] == "do the thing"
+        assert params["task_index"] == 0
+        assert params["task_count"] == 1
+
+    def test_subagent_thinking_emits_update(self, monkeypatch):
+        cb, calls = self._make_cb(monkeypatch)
+        cb(
+            "subagent.thinking",
+            name="delegate_tool",
+            preview="reasoning about the problem",
+            args={},
+            child_session_id="child-sid",
+            task_index=0,
+            task_count=1,
+        )
+        assert len(calls) == 1
+        method, params = calls[0]
+        assert method == "_hermes/subagent_update"
+        assert params["event_type"] == "thinking"
+        assert params["preview"] == "reasoning about the problem"
+        assert params["child_session_id"] == "child-sid"
+
+    def test_subagent_tool_emits_update(self, monkeypatch):
+        cb, calls = self._make_cb(monkeypatch)
+        cb(
+            "subagent.tool",
+            name="terminal",
+            preview="$ ls -la",
+            args={"command": "ls", "path": "/tmp"},
+            child_session_id="child-sid",
+            task_index=0,
+            task_count=1,
+        )
+        assert len(calls) == 1
+        method, params = calls[0]
+        assert method == "_hermes/subagent_update"
+        assert params["event_type"] == "tool"
+        assert params["tool_name"] == "terminal"
+        assert params["preview"] == "$ ls -la"
+        assert params["args"] == {"command": "ls", "path": "/tmp"}
+
+    def test_subagent_complete_emits_update(self, monkeypatch):
+        cb, calls = self._make_cb(monkeypatch)
+        cb(
+            "subagent.complete",
+            name="delegate_tool",
+            preview="all done",
+            args={},
+            status="success",
+            child_session_id="child-sid",
+            task_index=0,
+            task_count=1,
+            duration_seconds=4.2,
+        )
+        assert len(calls) == 1
+        method, params = calls[0]
+        assert method == "_hermes/subagent_update"
+        assert params["event_type"] == "complete"
+        assert params["status"] == "success"
+        assert params["summary"] == "all done"
+        assert params["duration_seconds"] == 4.2
+
+    def test_subagent_progress_not_bridged(self, monkeypatch):
+        """subagent.progress is CLI-only formatting and must NOT be bridged."""
+        cb, calls = self._make_cb(monkeypatch)
+        cb(
+            "subagent.progress",
+            name="delegate_tool",
+            preview="some progress",
+            args={},
+            child_session_id="child-sid",
+            task_index=0,
+            task_count=1,
+        )
+        assert len(calls) == 0
+
+    def test_tool_started_not_bridged(self, monkeypatch):
+        """Regression: tool.started must NOT be bridged as subagent_update."""
+        cb, calls = self._make_cb(monkeypatch)
+        with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
+            future = MagicMock(spec=Future)
+            future.result.return_value = None
+            mock_rcts.return_value = future
+            cb(
+                "tool.started",
+                name="terminal",
+                preview="$ ls",
+                args={"command": "ls"},
+            )
+        # No subagent notification should have been emitted
+        assert len(calls) == 0
+        # But the original path should still work (run_coroutine_threadsafe called)
+        mock_rcts.assert_called_once()
