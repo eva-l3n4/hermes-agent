@@ -431,6 +431,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "retain_every_n_turns", "description": "Retain every N turns (1 = every turn)", "default": 1},
             {"key": "retain_async","description": "Process retain asynchronously on the Hindsight server", "default": True},
             {"key": "retain_context", "description": "Context label for retained memories", "default": "conversation between Hermes Agent and the User"},
+            {"key": "user_role_name", "description": "Display name for the user role in retained conversation turns (affects extractor free-text and entity names)", "default": "user"},
+            {"key": "assistant_role_name", "description": "Display name for the assistant role in retained conversation turns (affects extractor free-text and entity names)", "default": "assistant"},
             {"key": "recall_max_tokens", "description": "Maximum tokens for recall results", "default": 4096},
             {"key": "recall_max_input_chars", "description": "Maximum input query length for auto-recall", "default": 800},
             {"key": "recall_prompt_preamble", "description": "Custom preamble for recalled memories in context"},
@@ -529,6 +531,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._auto_retain = self._config.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(self._config.get("retain_every_n_turns", 1)))
         self._retain_context = self._config.get("retain_context", "conversation between Hermes Agent and the User")
+        self._user_role_name = self._config.get("user_role_name", "user") or "user"
+        self._assistant_role_name = self._config.get("assistant_role_name", "assistant") or "assistant"
 
         # Recall controls
         self._auto_recall = self._config.get("auto_recall", True)
@@ -547,10 +551,11 @@ class HindsightMemoryProvider(MemoryProvider):
         logger.info("Hindsight initialized: mode=%s, api_url=%s, bank=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
                      self._mode, self._api_url, self._bank_id, self._budget, self._memory_mode, self._prefetch_method, _client_version)
         logger.debug("Hindsight config: auto_retain=%s, auto_recall=%s, retain_every_n=%d, "
-                     "retain_async=%s, retain_context=%s, "
+                     "retain_async=%s, retain_context=%s, user_role=%s, assistant_role=%s, "
                      "recall_max_tokens=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
                      self._auto_retain, self._auto_recall, self._retain_every_n_turns,
                      self._retain_async, self._retain_context,
+                     self._user_role_name, self._assistant_role_name,
                      self._recall_max_tokens, self._recall_max_input_chars,
                      self._tags, self._recall_tags)
 
@@ -725,8 +730,8 @@ class HindsightMemoryProvider(MemoryProvider):
         now = datetime.now(timezone.utc).isoformat()
 
         messages = [
-            {"role": "user", "content": user_content, "timestamp": now},
-            {"role": "assistant", "content": assistant_content, "timestamp": now},
+            {"role": self._user_role_name, "content": user_content, "timestamp": now},
+            {"role": self._assistant_role_name, "content": assistant_content, "timestamp": now},
         ]
 
         turn = json.dumps(messages)
