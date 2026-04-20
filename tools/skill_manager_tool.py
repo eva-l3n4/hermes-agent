@@ -73,6 +73,48 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
         logger.warning("Security scan failed for %s: %s", skill_dir, e, exc_info=True)
     return None
 
+
+def _security_scan_patch(
+    target_path: Path,
+    old_content: str,
+    new_content: str,
+    skill_name: str,
+) -> Optional[str]:
+    """Diff-aware scan for `patch` actions.
+
+    Only reports findings introduced by this specific edit — pre-existing
+    threat-vocabulary lines (e.g. a documentation reference to `rm -rf /` in a
+    warning paragraph) stay grandfathered, so the scanner does not turn skill
+    files into edit-once artifacts.
+
+    Returns an error string if the patch should be blocked, or None to allow.
+    """
+    if not _GUARD_AVAILABLE:
+        return None
+    try:
+        from tools.skills_guard import scan_patch as _scan_patch
+        result = _scan_patch(
+            old_content,
+            new_content,
+            source="agent-created",
+            file_name=target_path.name,
+            skill_name=skill_name,
+        )
+        allowed, reason = should_allow_install(result)
+        if allowed is True:
+            return None
+        report = format_scan_report(result)
+        if allowed is None:
+            logger.warning(
+                "Agent-created patch blocked (new dangerous findings): %s", reason
+            )
+        return f"Security scan blocked this patch ({reason}):\n{report}"
+    except Exception as e:
+        logger.warning(
+            "Security scan (patch) failed for %s: %s", target_path, e, exc_info=True
+        )
+    return None
+
 import yaml
 
 
@@ -473,8 +515,8 @@ def _patch_skill(
     original_content = content  # for rollback
     _atomic_write_text(target, new_content)
 
-    # Security scan — roll back on block
-    scan_error = _security_scan_skill(skill_dir)
+    # Diff-aware security scan — only new threats in the delta block the patch.
+    scan_error = _security_scan_patch(target, original_content, new_content, name)
     if scan_error:
         _atomic_write_text(target, original_content)
         return {"success": False, "error": scan_error}
