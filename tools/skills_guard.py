@@ -524,8 +524,199 @@ INVISIBLE_CHARS = {
 
 
 # ---------------------------------------------------------------------------
+# Markdown code-region awareness
+# ---------------------------------------------------------------------------
+#
+# A SKILL.md is documentation: it naturally describes commands the agent will
+# later run through the (separately scanned) terminal tool. When such a command
+# is shown inside a fenced block (```bash ...```) or an inline code span
+# (`sudo foo`), the skill is *documenting*, not *executing*. The scanner used
+# to flag these as threats, which made any skill that touched systemd, sudo,
+# or loopback addresses effectively unpatchable: the aggregate scan kept
+# re-finding the same documentation lines.
+#
+# The rule: patterns whose threat model assumes execution ("will this line
+# run?") are suppressed inside markdown code regions. Patterns whose threat
+# model is "the file itself is the payload" (prompt injection, invisible
+# unicode, markdown link exfil, hardcoded credentials) fire regardless of
+# region — an agent reading the file can still be manipulated, and a leaked
+# key in a code fence is still leaked.
+
+# Categories whose threat model is the file itself, not what executes later.
+ALWAYS_FIRE_CATEGORIES = frozenset({
+    "injection",
+    "credential_exposure",
+})
+
+# Individual pattern IDs that always fire even in code regions, because the
+# threat is the raw string content (markdown rendering, text hiding, etc.)
+# rather than a shell command.
+ALWAYS_FIRE_PATTERN_IDS = frozenset({
+    "md_image_exfil",
+    "md_link_exfil",
+    "invisible_unicode",
+})
+
+# Loopback addresses — bind-to-localhost / local health check, not exfiltration.
+_LOOPBACK_RE = re.compile(
+    r"(?:^|[^\w.])"                          # not part of a larger hostname
+    r"(?:127\.0\.0\.1|0\.0\.0\.0|::1|\[::1\]|localhost)"
+    r"(?::\d+)?"
+    r"(?:[^\w.]|$)",
+    re.IGNORECASE,
+)
+
+
+def _markdown_code_mask(content: str) -> List[bool]:
+    """For each 0-indexed line in `content`, return True iff the line is
+    inside a fenced code block (```...``` or ~~~...~~~). Inline code spans are
+    NOT handled here — callers inspect a single line with _mask_inline_code.
+    """
+    mask: List[bool] = []
+    fence: str = ""  # active fence marker ("```" or "~~~"), empty when outside
+    for line in content.split("\n"):
+        stripped = line.lstrip()
+        if fence:
+            mask.append(True)
+            # Closing fence must start with the same marker at the start of
+            # the line (after optional leading whitespace).
+            if stripped.startswith(fence):
+                fence = ""
+            continue
+        # Opening fence — the content of the fence line itself counts as code
+        # (it may contain the language tag but nothing executable).
+        if stripped.startswith("```"):
+            fence = "```"
+            mask.append(True)
+            continue
+        if stripped.startswith("~~~"):
+            fence = "~~~"
+            mask.append(True)
+            continue
+        mask.append(False)
+    return mask
+
+
+def _mask_inline_code(line: str) -> str:
+    """Replace content inside inline backtick code spans with spaces so regex
+    scans treat the span as absent. Preserves line length so match offsets
+    remain meaningful. Handles simple single-backtick spans, which is what
+    skill documentation overwhelmingly uses."""
+    out = []
+    inside = False
+    for ch in line:
+        if ch == "`":
+            inside = not inside
+            out.append(" ")
+        elif inside:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _should_suppress_in_code(pid: str, category: str) -> bool:
+    """Return True iff this pattern should be suppressed inside markdown code
+    regions (fenced blocks or inline spans)."""
+    if category in ALWAYS_FIRE_CATEGORIES:
+        return False
+    if pid in ALWAYS_FIRE_PATTERN_IDS:
+        return False
+    return True
+
+
+def _hardcoded_ip_is_loopback(matched_line: str) -> bool:
+    """For the hardcoded_ip_port rule, treat loopback/local-bind addresses as
+    non-findings. A skill documenting `127.0.0.1:9177` is describing a local
+    service, not staging exfiltration."""
+    return bool(_LOOPBACK_RE.search(matched_line))
+
+
+# ---------------------------------------------------------------------------
 # Scanning functions
 # ---------------------------------------------------------------------------
+
+def scan_content(
+    content: str,
+    rel_path: str,
+    *,
+    is_markdown: bool | None = None,
+) -> List[Finding]:
+    """Scan a string for threat patterns and invisible unicode.
+
+    Args:
+        content: File text.
+        rel_path: Display path for findings.
+        is_markdown: Whether to treat `content` as markdown (enables code-region
+            awareness). When None, infers from `rel_path` suffix / "SKILL.md".
+
+    Returns:
+        List of findings (deduplicated per pattern per line).
+    """
+    if is_markdown is None:
+        lower = rel_path.lower()
+        is_markdown = lower.endswith(".md") or Path(rel_path).name == "SKILL.md"
+
+    lines = content.split('\n')
+    code_mask = _markdown_code_mask(content) if is_markdown else [False] * len(lines)
+
+    findings: List[Finding] = []
+    seen: set[tuple[str, int]] = set()  # (pattern_id, line_number) dedup
+
+    for pattern, pid, severity, category, description in THREAT_PATTERNS:
+        suppress_in_code = is_markdown and _should_suppress_in_code(pid, category)
+        for idx, raw_line in enumerate(lines):
+            line_no = idx + 1
+            if (pid, line_no) in seen:
+                continue
+
+            # Skip lines inside fenced code blocks for execution-threat patterns
+            if suppress_in_code and code_mask[idx]:
+                continue
+
+            # For markdown, strip inline code spans before matching (only for
+            # patterns that suppress in code — structural patterns get raw line)
+            scan_line = _mask_inline_code(raw_line) if suppress_in_code else raw_line
+
+            if not re.search(pattern, scan_line, re.IGNORECASE):
+                continue
+
+            # Per-pattern overrides: loopback is not exfil
+            if pid == "hardcoded_ip_port" and _hardcoded_ip_is_loopback(raw_line):
+                continue
+
+            seen.add((pid, line_no))
+            matched_text = raw_line.strip()
+            if len(matched_text) > 120:
+                matched_text = matched_text[:117] + "..."
+            findings.append(Finding(
+                pattern_id=pid,
+                severity=severity,
+                category=category,
+                file=rel_path,
+                line=line_no,
+                match=matched_text,
+                description=description,
+            ))
+
+    # Invisible unicode — always fires, regardless of region.
+    for idx, raw_line in enumerate(lines):
+        for char in INVISIBLE_CHARS:
+            if char in raw_line:
+                char_name = _unicode_char_name(char)
+                findings.append(Finding(
+                    pattern_id="invisible_unicode",
+                    severity="high",
+                    category="injection",
+                    file=rel_path,
+                    line=idx + 1,
+                    match=f"U+{ord(char):04X} ({char_name})",
+                    description=f"invisible unicode character {char_name} (possible text hiding/injection)",
+                ))
+                break  # one finding per line for invisible chars
+
+    return findings
+
 
 def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     """
@@ -549,47 +740,60 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     except (UnicodeDecodeError, OSError):
         return []
 
-    findings = []
-    lines = content.split('\n')
-    seen = set()  # (pattern_id, line_number) for deduplication
+    return scan_content(content, rel_path)
 
-    # Regex pattern matching
-    for pattern, pid, severity, category, description in THREAT_PATTERNS:
-        for i, line in enumerate(lines, start=1):
-            if (pid, i) in seen:
-                continue
-            if re.search(pattern, line, re.IGNORECASE):
-                seen.add((pid, i))
-                matched_text = line.strip()
-                if len(matched_text) > 120:
-                    matched_text = matched_text[:117] + "..."
-                findings.append(Finding(
-                    pattern_id=pid,
-                    severity=severity,
-                    category=category,
-                    file=rel_path,
-                    line=i,
-                    match=matched_text,
-                    description=description,
-                ))
 
-    # Invisible unicode character detection
-    for i, line in enumerate(lines, start=1):
-        for char in INVISIBLE_CHARS:
-            if char in line:
-                char_name = _unicode_char_name(char)
-                findings.append(Finding(
-                    pattern_id="invisible_unicode",
-                    severity="high",
-                    category="injection",
-                    file=rel_path,
-                    line=i,
-                    match=f"U+{ord(char):04X} ({char_name})",
-                    description=f"invisible unicode character {char_name} (possible text hiding/injection)",
-                ))
-                break  # one finding per line for invisible chars
+def scan_patch(
+    old_content: str,
+    new_content: str,
+    *,
+    source: str = "agent-created",
+    file_name: str = "SKILL.md",
+    skill_name: str | None = None,
+) -> ScanResult:
+    """Scan a proposed patch, returning ONLY findings introduced by the diff.
 
-    return findings
+    A pattern_id + normalized match that already existed in `old_content` is
+    treated as unchanged — the scanner has already decided what to do about it
+    at creation time, and re-surfacing it on every patch is what made
+    devops-flavored skills effectively uneditable.
+
+    Args:
+        old_content: Pre-patch file contents (empty string for new files).
+        new_content: Post-patch file contents.
+        source: Trust source for INSTALL_POLICY lookup.
+        file_name: Relative path for findings display.
+        skill_name: Optional skill name for the ScanResult (defaults to file_name).
+
+    Returns:
+        ScanResult whose `findings` contains only delta-new threats.
+    """
+    old_findings = scan_content(old_content, file_name) if old_content else []
+    new_findings = scan_content(new_content, file_name)
+
+    def _key(f: Finding) -> tuple[str, str]:
+        # Ignore line numbers — a line may have shifted without changing.
+        # Normalize whitespace in the matched text so trivial formatting
+        # changes don't look like "new" threats.
+        return (f.pattern_id, re.sub(r"\s+", " ", f.match.strip()))
+
+    old_keys = {_key(f) for f in old_findings}
+    delta = [f for f in new_findings if _key(f) not in old_keys]
+
+    trust_level = _resolve_trust_level(source)
+    verdict = _determine_verdict(delta)
+    name = skill_name or file_name
+    summary = _build_summary(name, source, trust_level, verdict, delta)
+
+    return ScanResult(
+        skill_name=name,
+        source=source,
+        trust_level=trust_level,
+        verdict=verdict,
+        findings=delta,
+        scanned_at=datetime.now(timezone.utc).isoformat(),
+        summary=summary,
+    )
 
 
 def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
