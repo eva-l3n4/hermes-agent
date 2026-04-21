@@ -99,6 +99,17 @@ class LocalEditSnapshot:
 # =========================================================================
 _tool_preview_max_len: int = 0  # 0 = unlimited
 
+# =========================================================================
+# Large tool-call payload warning threshold (KB; 0 = disabled)
+# Tool calls whose serialized arguments exceed this many KB trigger a
+# visible ⚠ marker in the preview. Empirically, payloads over ~40KB make
+# some upstream providers (notably Azure opus-4-7) return empty completions
+# on the *following* turn — the model sees its own bloated tool_use block
+# in history and produces nothing. Default 25KB is a safe margin.
+# Set via display.tool_preview_size_warn_kb in config; 0 disables.
+# =========================================================================
+_tool_preview_size_warn_kb: int = 25
+
 
 def set_tool_preview_max_len(n: int) -> None:
     """Set the global max length for tool call previews. 0 = no limit."""
@@ -109,6 +120,29 @@ def set_tool_preview_max_len(n: int) -> None:
 def get_tool_preview_max_len() -> int:
     """Return the configured max preview length (0 = unlimited)."""
     return _tool_preview_max_len
+
+
+def set_tool_preview_size_warn_kb(n: int) -> None:
+    """Set the threshold (KB) for warning on bloated tool-call payloads.
+
+    0 = disabled. Applies to the serialized JSON of the tool's arguments.
+    """
+    global _tool_preview_size_warn_kb
+    _tool_preview_size_warn_kb = max(int(n), 0) if n else 0
+
+
+def get_tool_preview_size_warn_kb() -> int:
+    """Return the configured payload warning threshold (KB); 0 = disabled."""
+    return _tool_preview_size_warn_kb
+
+
+def _payload_size_kb(args: dict) -> float:
+    """Return serialized JSON size of *args* in KB (1 KB = 1024 bytes)."""
+    try:
+        import json as _json
+        return len(_json.dumps(args, ensure_ascii=False).encode("utf-8")) / 1024.0
+    except Exception:
+        return 0.0
 
 
 # =========================================================================
@@ -271,6 +305,13 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         return None
     if max_len > 0 and len(preview) > max_len:
         preview = preview[:max_len - 3] + "..."
+
+    # Prepend size warning for bloated payloads — e.g. 49KB write_file.content
+    # that will sit in history and cause empty completions on the next turn.
+    if _tool_preview_size_warn_kb > 0:
+        size_kb = _payload_size_kb(args)
+        if size_kb >= _tool_preview_size_warn_kb:
+            preview = f"⚠{size_kb:.1f}KB  {preview}"
     return preview
 
 

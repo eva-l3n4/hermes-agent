@@ -559,9 +559,11 @@ except Exception:
 
 # Initialize tool preview length from config
 try:
-    from agent.display import set_tool_preview_max_len
+    from agent.display import set_tool_preview_max_len, set_tool_preview_size_warn_kb
     _tpl = CLI_CONFIG.get("display", {}).get("tool_preview_length", 0)
     set_tool_preview_max_len(int(_tpl) if _tpl else 0)
+    _tps = CLI_CONFIG.get("display", {}).get("tool_preview_size_warn_kb", 25)
+    set_tool_preview_size_warn_kb(int(_tps) if _tps is not None else 25)
 except Exception:
     pass
 
