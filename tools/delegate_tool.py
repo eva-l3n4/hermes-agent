@@ -388,6 +388,50 @@ def _build_child_agent(
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
+    # Debug instrumentation: dump child-agent inputs for post-hoc failure analysis.
+    # Gated behind HERMES_DELEGATE_DEBUG_DUMP env var so it's inert in normal use.
+    # When enabled, each delegate_task call writes a JSON dump of the exact inputs
+    # the child will see -- lets us replay real-world failures in a harness.
+    if os.getenv("HERMES_DELEGATE_DEBUG_DUMP"):
+        try:
+            dump_dir = os.getenv("HERMES_DELEGATE_DEBUG_DIR", "/tmp")
+            dump_path = os.path.join(
+                dump_dir,
+                f"delegate_debug_{int(time.time() * 1000)}_{task_index}.json",
+            )
+            _parent_hist = getattr(parent_agent, "conversation_history", None) or []
+            dump = {
+                "timestamp": time.time(),
+                "task_index": task_index,
+                "goal": goal,
+                "context": context,
+                "child_toolsets": child_toolsets,
+                "child_system_prompt": child_prompt,
+                "effective_model": effective_model,
+                "effective_provider": effective_provider,
+                "effective_base_url": effective_base_url,
+                "effective_api_mode": effective_api_mode,
+                "effective_acp_command": effective_acp_command,
+                "effective_acp_args": effective_acp_args,
+                "parent_platform": getattr(parent_agent, "platform", None),
+                "parent_model": getattr(parent_agent, "model", None),
+                "parent_conv_history_len": len(_parent_hist),
+                "parent_conv_history_bytes": sum(
+                    len(str(m.get("content", ""))) for m in _parent_hist
+                ),
+                "parent_enabled_toolsets": list(
+                    getattr(parent_agent, "enabled_toolsets", None) or []
+                ),
+                "workspace_hint": workspace_hint,
+                "max_iterations": max_iterations,
+                "child_reasoning": str(child_reasoning) if child_reasoning else None,
+            }
+            with open(dump_path, "w") as f:
+                json.dump(dump, f, indent=2, default=str)
+            logger.debug("delegate_task debug dump: %s", dump_path)
+        except Exception as exc:
+            logger.debug("delegate_task debug dump failed: %s", exc)
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
