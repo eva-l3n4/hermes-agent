@@ -445,6 +445,20 @@ class HermesACPAgent(acp.Agent):
         agent.step_callback = step_cb
         agent.message_callback = message_cb
 
+        # Wire interim_assistant_callback to stream mid-turn assistant text (preamble
+        # before tool calls) to Kaishi. When streaming is active, already_streamed=True
+        # tells us the deltas already went through another channel — skip to avoid dupes.
+        # ACP adapter does not currently wire stream_delta_callback, so in practice
+        # already_streamed is always False here, but we honor the flag for correctness.
+        if message_cb is not None:
+            def _interim_cb(text: str, *, already_streamed: bool = False) -> None:
+                if already_streamed or not text:
+                    return
+                message_cb(text)
+            agent.interim_assistant_callback = _interim_cb
+        else:
+            agent.interim_assistant_callback = None
+
         if approval_cb:
             try:
                 from tools import terminal_tool as _terminal_tool
