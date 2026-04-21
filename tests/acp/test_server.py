@@ -160,6 +160,8 @@ class TestSessionOps:
             "reset",
             "compact",
             "version",
+            "title",
+            "yolo",
         ]
         model_cmd = next(
             cmd for cmd in update.available_commands if cmd.name == "model"
@@ -328,6 +330,45 @@ class TestPrompt:
         await agent.prompt(prompt=prompt, session_id=new_resp.session_id)
 
         assert state.history == expected_history
+
+    @pytest.mark.asyncio
+    async def test_prompt_auto_titles_first_exchange(self, agent):
+        """Auto-title must use the SessionManager's DB, not agent._session_db.
+
+        Regression: previously the callsite read ``state.agent._session_db``,
+        but ``_make_agent`` never passes ``session_db=`` so the agent attribute
+        is always None and ``maybe_auto_title`` silently skipped every ACP
+        session. This test pins the DB handle used by the wiring.
+        """
+        new_resp = await agent.new_session(cwd=".")
+        state = agent.session_manager.get_session(new_resp.session_id)
+
+        state.agent.run_conversation = MagicMock(return_value={
+            "final_response": "hey",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hey"},
+            ],
+        })
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        # Sentinel DB returned by the SessionManager; verify it is the one
+        # passed to maybe_auto_title.
+        sentinel_db = MagicMock(name="SessionDB")
+        with patch.object(agent.session_manager, "_get_db", return_value=sentinel_db), \
+             patch("agent.title_generator.maybe_auto_title") as mock_auto:
+            prompt = [TextContentBlock(type="text", text="hi")]
+            await agent.prompt(prompt=prompt, session_id=new_resp.session_id)
+
+            mock_auto.assert_called_once()
+            args, _ = mock_auto.call_args
+            assert args[0] is sentinel_db, "auto-title must use SessionManager DB, not state.agent._session_db"
+            assert args[1] == new_resp.session_id
+            assert args[2] == "hi"
+            assert args[3] == "hey"
 
     @pytest.mark.asyncio
     async def test_prompt_sends_final_message_update(self, agent):

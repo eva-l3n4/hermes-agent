@@ -502,12 +502,17 @@ class HermesACPAgent(acp.Agent):
             update = acp.update_agent_message_text(final_response)
             await conn.session_update(session_id, update)
 
-        # Auto-generate session title after first exchange (non-blocking)
+        # Auto-generate session title after first exchange (non-blocking).
+        # Use the SessionManager's DB rather than ``state.agent._session_db``:
+        # ``SessionManager._make_agent`` constructs the AIAgent without a
+        # ``session_db`` argument (DB ownership stays with the manager so
+        # messages aren't double-written), so the agent attribute is always
+        # None and auto-titling would silently skip.
         if final_response and not result.get("failed") and not result.get("partial"):
             try:
                 from agent.title_generator import maybe_auto_title
                 maybe_auto_title(
-                    getattr(state.agent, "_session_db", None),
+                    self.session_manager._get_db(),
                     session_id,
                     user_text,
                     final_response,
