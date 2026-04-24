@@ -371,8 +371,9 @@ class ContextCompressor(ContextEngine):
             c = "".join(b.get("text", "") for b in c if isinstance(b, dict))
         return cls._EMPTY_NUDGE_SUBSTRING in (c or "")
 
+    @classmethod
     def _strip_poison_tail(
-        self, messages: List[Dict[str, Any]]
+        cls, messages: List[Dict[str, Any]]
     ) -> tuple[List[Dict[str, Any]], int]:
         """Remove empty-response recovery artifacts from conversation history.
 
@@ -407,7 +408,7 @@ class ContextCompressor(ContextEngine):
         cleaned: List[Dict[str, Any]] = []
         removed = 0
         for msg in messages:
-            if self._is_empty_assistant_sentinel(msg):
+            if cls._is_empty_assistant_sentinel(msg):
                 removed += 1
                 continue
             cleaned.append(msg)
@@ -417,7 +418,7 @@ class ContextCompressor(ContextEngine):
         # surviving nudges are orphans.
         final: List[Dict[str, Any]] = []
         for msg in cleaned:
-            if self._is_empty_nudge(msg):
+            if cls._is_empty_nudge(msg):
                 removed += 1
                 continue
             final.append(msg)

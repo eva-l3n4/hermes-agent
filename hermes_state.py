@@ -928,6 +928,25 @@ class SessionDB:
                         logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
                         msg["codex_reasoning_items"] = None
             messages.append(msg)
+
+        # Load-time poison scrub: strip '(empty)' assistant sentinels and
+        # their paired user nudges before handing history to a live agent
+        # loop.  Sessions written before the compaction-time cleanser
+        # shipped may carry these artifacts on disk; replaying them
+        # produces few-shot precedent for empty completions.  Keeping this
+        # import lazy avoids pulling the compressor (and its auxiliary
+        # client chain) into SessionDB startup.
+        try:
+            from agent.context_compressor import ContextCompressor
+            messages, poison_removed = ContextCompressor._strip_poison_tail(messages)
+            if poison_removed:
+                logger.info(
+                    "get_messages_as_conversation: stripped %d poison artifact(s) from session %s",
+                    poison_removed, session_id,
+                )
+        except Exception as e:  # pragma: no cover — never fail the load
+            logger.warning("Poison-tail scrub failed for session %s: %s", session_id, e)
+
         return messages
 
     # =========================================================================

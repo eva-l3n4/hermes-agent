@@ -170,6 +170,35 @@ class TestMessageStorage:
         assert conv[0] == {"role": "user", "content": "Hello"}
         assert conv[1] == {"role": "assistant", "content": "Hi!"}
 
+    def test_get_messages_as_conversation_scrubs_poison_tail(self, db):
+        """Load-time poison-tail scrub: '(empty)' sentinels and paired
+        user nudges written before the compaction-time cleanser shipped
+        must not be replayed back into the agent loop.
+
+        Regression for https://... hermes-compaction-diagnosis skill —
+        reopened sessions that never hit the compaction threshold would
+        otherwise seed the next turn with empty-response precedent.
+        """
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="do the thing")
+        db.append_message("s1", role="assistant", content="(empty)")
+        db.append_message(
+            "s1", role="user",
+            content=(
+                "You just executed tool calls but returned an empty response. "
+                "Please process the tool results above and continue."
+            ),
+        )
+        db.append_message("s1", role="assistant", content="(empty)")
+        db.append_message("s1", role="user", content="real follow-up")
+
+        conv = db.get_messages_as_conversation("s1")
+
+        # Sentinels and nudge dropped; real turns survive.
+        assert [m["role"] for m in conv] == ["user", "user"]
+        assert [m["content"] for m in conv] == ["do the thing", "real follow-up"]
+        assert all("(empty)" not in (m.get("content") or "") for m in conv)
+
     def test_finish_reason_stored(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="assistant", content="Done", finish_reason="stop")

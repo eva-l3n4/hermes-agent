@@ -919,3 +919,20 @@ class TestStripPoisonTail:
         assert removed == 1
         assert len(result) == 3
 
+    def test_strip_poison_tail_callable_as_classmethod(self):
+        """Load-time scrubber in hermes_state.get_messages_as_conversation
+        invokes the helper without instantiating a ContextCompressor.
+        Guard the classmethod contract."""
+        from agent.context_compressor import ContextCompressor
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "(empty)"},
+            {"role": "user", "content":
+                "You just executed tool calls but returned an empty response."},
+            {"role": "user", "content": "follow-up"},
+        ]
+        result, removed = ContextCompressor._strip_poison_tail(msgs)
+        assert removed == 2
+        assert [m["role"] for m in result] == ["user", "user"]
+        assert all("(empty)" not in (m.get("content") or "") for m in result)
+
