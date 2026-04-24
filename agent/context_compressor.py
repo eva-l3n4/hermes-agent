@@ -330,6 +330,101 @@ class ContextCompressor(ContextEngine):
         return True
 
     # ------------------------------------------------------------------
+    # Poison-tail scrubbing (cheap pre-pass, no LLM call)
+    # ------------------------------------------------------------------
+
+    # Nudge text from run_agent.py's post-tool-call empty-response recovery
+    # path.  Kept as a substring check so minor future wording tweaks still
+    # match (e.g. trailing period changes, whitespace normalisation).
+    _EMPTY_NUDGE_SUBSTRING = (
+        "executed tool calls but returned an empty response"
+    )
+
+    @classmethod
+    def _is_empty_assistant_sentinel(cls, msg: Dict[str, Any]) -> bool:
+        """True when msg is the '(empty)' sentinel emitted by the
+        run_agent.py empty-response recovery path.
+
+        The sentinel takes two shapes:
+          1. content == '(empty)', no tool_calls  — from the final terminal
+          2. content == '(empty)' alongside an upstream assistant message
+             that the nudge injection wrapped (pre-nudge snapshot).
+        We match on the literal content string only; tool_calls vary.
+        """
+        if msg.get("role") != "assistant":
+            return False
+        c = msg.get("content")
+        # Content can be a string, None, or Anthropic-style list of blocks.
+        if isinstance(c, list):
+            c = "".join(b.get("text", "") for b in c if isinstance(b, dict))
+        text = (c or "").strip()
+        return text == "(empty)"
+
+    @classmethod
+    def _is_empty_nudge(cls, msg: Dict[str, Any]) -> bool:
+        """True when msg is the user-role nudge injected after an
+        empty-response assistant sentinel."""
+        if msg.get("role") != "user":
+            return False
+        c = msg.get("content")
+        if isinstance(c, list):
+            c = "".join(b.get("text", "") for b in c if isinstance(b, dict))
+        return cls._EMPTY_NUDGE_SUBSTRING in (c or "")
+
+    def _strip_poison_tail(
+        self, messages: List[Dict[str, Any]]
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """Remove empty-response recovery artifacts from conversation history.
+
+        When Azure / the provider returns content-empty completions (often
+        caused by bloated tool_use blocks — see hermes-empty-completion-triage
+        skill), run_agent.py records the sequence
+
+            assistant("(empty)") [tool_calls may be present]
+            user("You just executed tool calls but returned an empty
+                  response. Please process the tool results...")
+            assistant("(empty)")            ← after the retry also fails
+
+        Compaction's ``protect_last_n`` would otherwise preserve this triplet
+        verbatim into the post-compression history, where it acts as
+        few-shot precedent that the model imitates — producing empty replies
+        on the very next turn after compression.  That is the user-facing
+        symptom of "``/compact`` empties out my replies".
+
+        This helper removes those sentinel pairs and any orphaned nudge-only
+        runs.  Tool-call / tool-result pair integrity is handled separately
+        by :meth:`_sanitize_tool_pairs` after compression, so we do not need
+        to track surviving call_ids here — dropping an assistant with
+        tool_calls may leave orphan tool results, but the sanitizer will
+        convert them to stubs.
+
+        Returns (scrubbed_messages, count_removed).
+        """
+        if not messages:
+            return messages, 0
+
+        # First pass: drop every '(empty)' assistant sentinel.
+        cleaned: List[Dict[str, Any]] = []
+        removed = 0
+        for msg in messages:
+            if self._is_empty_assistant_sentinel(msg):
+                removed += 1
+                continue
+            cleaned.append(msg)
+
+        # Second pass: drop every empty-response nudge.  The nudge only
+        # makes sense paired with a sentinel assistant; after pass 1 any
+        # surviving nudges are orphans.
+        final: List[Dict[str, Any]] = []
+        for msg in cleaned:
+            if self._is_empty_nudge(msg):
+                removed += 1
+                continue
+            final.append(msg)
+
+        return final, removed
+
+    # ------------------------------------------------------------------
     # Tool output pruning (cheap pre-pass, no LLM call)
     # ------------------------------------------------------------------
 
@@ -1027,6 +1122,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+
+        # Phase 0: Strip empty-response recovery artifacts before anything
+        # else.  If we don't, protect_last_n will faithfully preserve a
+        # tail like assistant("(empty)") → user(nudge) → assistant("(empty)")
+        # from a poisoned earlier session, and the model will imitate the
+        # precedent on the very next turn after compression.  See
+        # hermes-empty-completion-triage skill for the upstream cause.
+        messages, scrubbed_count = self._strip_poison_tail(messages)
+        if scrubbed_count and not self.quiet_mode:
+            logger.info(
+                "Pre-compression: scrubbed %d empty-response recovery "
+                "artifact(s) from history", scrubbed_count,
+            )
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(

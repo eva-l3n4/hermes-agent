@@ -781,3 +781,141 @@ class TestTokenBudgetTailProtection:
         # Tool at index 2 is outside the protected tail (last 3 = indices 2,3,4)
         # so it might or might not be pruned depending on boundary
         assert isinstance(pruned, int)
+
+
+class TestStripPoisonTail:
+    """Regression tests for /compact preserving '(empty)' recovery artifacts.
+
+    Azure Opus 4.7 returns content-empty completions when a prior tool_use
+    block is bloated (~40KB+).  run_agent.py's recovery path records:
+        assistant("(empty)")
+        user("You just executed tool calls but returned an empty response...")
+        assistant("(empty)")
+    If compaction preserves these in protect_last_n, the compressed history
+    seeds the next turn with empty-response precedent — the model imitates.
+    """
+
+    def test_strips_empty_assistant_sentinel(self, compressor):
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "(empty)"},
+            {"role": "user", "content": "hi again"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 1
+        assert len(result) == 2
+        assert all(m.get("content") != "(empty)" for m in result)
+
+    def test_strips_empty_response_nudge(self, compressor):
+        nudge = (
+            "You just executed tool calls but returned an empty response. "
+            "Please process the tool results above and continue with the task."
+        )
+        msgs = [
+            {"role": "user", "content": "do the thing"},
+            {"role": "user", "content": nudge},
+            {"role": "assistant", "content": "ok done"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 1
+        assert len(result) == 2
+        assert all("executed tool calls but returned an empty response" not in (m.get("content") or "")
+                   for m in result)
+
+    def test_strips_full_poison_triplet(self, compressor):
+        """The canonical failure mode: sentinel -> nudge -> sentinel."""
+        nudge = (
+            "You just executed tool calls but returned an empty response. "
+            "Please process the tool results above."
+        )
+        msgs = [
+            {"role": "user", "content": "real work"},
+            {"role": "assistant", "content": "working on it"},
+            {"role": "assistant", "content": "(empty)"},
+            {"role": "user", "content": nudge},
+            {"role": "assistant", "content": "(empty)"},
+            {"role": "user", "content": "new actual user turn"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 3
+        assert len(result) == 3
+        roles = [m.get("role") for m in result]
+        assert roles == ["user", "assistant", "user"]
+        assert result[-1].get("content") == "new actual user turn"
+
+    def test_preserves_real_empty_paren_in_body(self, compressor):
+        """Content that merely mentions '(empty)' must not be stripped.
+
+        Only a bare-exact '(empty)' (after strip()) is the sentinel.
+        """
+        msgs = [
+            {"role": "assistant", "content": "The result list is (empty) when no rows match."},
+            {"role": "user", "content": "Why is the list (empty)?"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 0
+        assert len(result) == 2
+
+    def test_preserves_real_tool_call_assistant(self, compressor):
+        """Assistants that actually did work must never be scrubbed,
+        even if content happens to be empty-string alongside tool_calls.
+        Only the literal '(empty)' sentinel is a target.
+        """
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "read_file", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "file contents"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 0
+        assert len(result) == 2
+
+    def test_handles_anthropic_content_blocks(self, compressor):
+        """Anthropic-style list-of-blocks content must be unwrapped for matching."""
+        msgs = [
+            {"role": "assistant", "content": [{"type": "text", "text": "(empty)"}]},
+            {"role": "user", "content": [{"type": "text", "text": "normal message"}]},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 1
+        assert len(result) == 1
+        # non-sentinel anthropic content should survive
+        assert result[0].get("role") == "user"
+
+    def test_empty_input(self, compressor):
+        result, removed = compressor._strip_poison_tail([])
+        assert result == []
+        assert removed == 0
+
+    def test_no_artifacts_is_noop(self, compressor):
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello there"},
+            {"role": "user", "content": "bye"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 0
+        assert len(result) == 3
+        # Must preserve original ordering and content
+        assert result == msgs
+
+    def test_orphan_nudge_without_sentinel_is_still_stripped(self, compressor):
+        """A lone nudge with no surrounding sentinels is still noise —
+        it references an empty response that isn't in the history."""
+        msgs = [
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "real reply"},
+            {"role": "user", "content":
+                "You just executed tool calls but returned an empty response."},
+            {"role": "user", "content": "real follow-up"},
+        ]
+        result, removed = compressor._strip_poison_tail(msgs)
+        assert removed == 1
+        assert len(result) == 3
+
