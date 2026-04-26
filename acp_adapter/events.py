@@ -30,14 +30,32 @@ def _send_update(
     loop: asyncio.AbstractEventLoop,
     update: Any,
 ) -> None:
-    """Fire-and-forget an ACP session update from a worker thread."""
+    """Fire-and-forget an ACP session update from a worker thread.
+
+    Schedules the coroutine on the main loop and returns immediately. The
+    streaming hot path (reasoning_callback, interim_assistant_callback)
+    invokes this once per delta — providers that emit per-token chunks
+    (Ollama Cloud's ``fp_ollama`` route emits >300 ``reasoning_content``
+    deltas on a tiny prompt) would otherwise serialise the streaming worker
+    against the loop's round-trip latency, producing buffered playback even
+    though every layer below is actually streaming.
+    """
     try:
         future = asyncio.run_coroutine_threadsafe(
             conn.session_update(session_id, update), loop
         )
-        future.result(timeout=5)
-    except Exception:
-        logger.debug("Failed to send ACP update", exc_info=True)
+    except Exception:  # loop closed, conn torn down, etc.
+        logger.debug("Failed to schedule ACP update", exc_info=True)
+        return
+
+    def _log_failure(fut: "asyncio.Future") -> None:
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.debug("ACP update failed: %s", exc, exc_info=exc)
+
+    future.add_done_callback(_log_failure)
 
 
 def _send_notification(
@@ -57,9 +75,18 @@ def _send_notification(
         future = asyncio.run_coroutine_threadsafe(
             conn.ext_notification(method, params), loop
         )
-        future.result(timeout=5)
     except Exception:
-        logger.debug("Failed to send notification %s", method, exc_info=True)
+        logger.debug("Failed to schedule notification %s", method, exc_info=True)
+        return
+
+    def _log_failure(fut: "asyncio.Future") -> None:
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.debug("notification %s failed: %s", method, exc, exc_info=exc)
+
+    future.add_done_callback(_log_failure)
 
 
 # NOTE: This bridge assumes at most ONE level of delegation
